@@ -1,8 +1,6 @@
 import torch.nn as nn
-from models.mlp import MLPActor
-from models.mlp import MLPCritic,MLP
 import torch.nn.functional as F
-from models.graphCNN import GraphCNN
+from models.graphCNN import GraphCNN, MLPActor, MLP, MLPCritic
 from torch.distributions.categorical import Categorical
 import torch
 from Params import configs
@@ -10,6 +8,14 @@ from Mhattention import ProbAttention
 from agent_utils import greedy_select_action, select_gpus
 from models.Pointer import Pointer
 INIT = configs.Init
+
+
+def block_diag(matrices):
+    # 从形状[B, N, N]转换为[B*N, B*N]
+    from torch import block_diag as torch_block_diag
+    return torch_block_diag(*matrices)
+
+
 class Attention(nn.Module):
     def __init__(self, hidden_size):
         super(Attention, self).__init__()
@@ -31,22 +37,20 @@ class Attention(nn.Module):
         return u_i
 
 class Encoder(nn.Module):
-    def __init__(self,num_layers, num_mlp_layers, input_dim,  hidden_dim, learn_eps, neighbor_pooling_type, device):
+    def __init__(self,num_layers, num_mlp_layers, input_dim,  hidden_dim, output_dim, learn_eps, neighbor_pooling_type, device):
         super(Encoder,self).__init__()
         self.feature_extract = GraphCNN(num_layers=num_layers,
                                         num_mlp_layers=num_mlp_layers,
                                         input_dim=input_dim,
                                         hidden_dim=hidden_dim,
+                                        output_dim=output_dim,
                                         learn_eps=learn_eps,
                                         neighbor_pooling_type=neighbor_pooling_type,
                                         device=device).to(device)
     def forward(self, expert_nodes, graph_pool, padded_nei, expert_links,):
-        h_pooled, h_nodes = self.feature_extract(expert_nodes=expert_nodes,
-                                                 graph_pool=graph_pool,
-                                                 padded_nei=padded_nei,
-                                                 expert_links=expert_links)
+        h_nodes = self.feature_extract(node_features=expert_nodes, adj_matrices=expert_links)
 
-        return h_pooled,h_nodes
+        return h_nodes
 
 class Expert_Actor(nn.Module):
     def __init__(self,
@@ -57,6 +61,7 @@ class Expert_Actor(nn.Module):
                  neighbor_pooling_type,
                  input_dim,
                  hidden_dim,
+                 output_dim,
                  num_mlp_layers_feature_extract,
                  num_mlp_layers_critic,
                  hidden_dim_critic,
@@ -75,6 +80,7 @@ class Expert_Actor(nn.Module):
                                num_mlp_layers=num_mlp_layers_feature_extract,
                                input_dim=input_dim,
                                hidden_dim=hidden_dim,
+                               output_dim=output_dim,
                                learn_eps=learn_eps,
                                neighbor_pooling_type=neighbor_pooling_type,
                                device=device).to(device)
@@ -90,6 +96,7 @@ class Expert_Actor(nn.Module):
                 elif 'bias' in name:
                     nn.init.constant_(p, 0)
 
+
     def forward(self, 
                 expert_nodes, 
                 expert_links, 
@@ -101,17 +108,18 @@ class Expert_Actor(nn.Module):
                 T=1,
                 greedy=True
                 ):
-        print("\nExpert_Actor Forward:\n")
-        h_pooled, h_nodes = self.encoder(expert_nodes=expert_nodes,
+        print("\nExpert_Actor Forward:\nGNN Encoder begin!")
+        expert_nodes = expert_nodes.view(-1, expert_nodes.size(2))  # reshape from [B, N, F] to [B*N, F]
+        B, N, _ = expert_links.shape
+        expert_links = block_diag([expert_links[b] for b in range(B)]) # reshape from [B, N, N] to [B*N, B*N]
+        h_nodes = self.encoder(expert_nodes=expert_nodes,
                                          graph_pool=graph_pool,
                                          padded_nei=padded_nei,
                                          expert_links=expert_links)
-        print("\nExpert_Actor encoder success!")
-        print("h_pooled: shape ", h_pooled.shape, "\n")
-        print("h_nodes: shape ", h_nodes.shape, "\n")
+        print("Expert_Actor encoder success!")
         if old_policy:
             # Prepare features for actor
-            dummy = expert_candidate.unsqueeze(-1).expand(-1, 1, h_nodes.size(-1)) 
+            dummy = expert_candidate.unsqueeze(-1).expand(B, N, h_nodes.size(-1)) 
             candidate_feature = torch.gather(h_nodes, 1, dummy)
             expert_context = torch.cat((candidate_feature, h_pooled.unsqueeze(1).expand_as(candidate_feature)), dim=-1)
             

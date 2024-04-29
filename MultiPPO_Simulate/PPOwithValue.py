@@ -83,7 +83,6 @@ class PPO:
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.k_epochs = k_epochs
-
         self.policy_expert = Expert_Actor(n_moe_layer=configs.n_moe_layer,
                                     n_e=configs.n_e,
                                     num_layers=configs.num_layers,
@@ -91,6 +90,7 @@ class PPO:
                                     neighbor_pooling_type=configs.neighbor_pooling_type,
                                     input_dim=configs.input_dim,
                                     hidden_dim=configs.hidden_dim,
+                                    output_dim=configs.output_dim,
                                     num_mlp_layers_feature_extract=configs.num_mlp_layers_feature_extract,
                                     num_mlp_layers_critic=num_mlp_layers_critic,
                                     hidden_dim_critic=hidden_dim_critic,
