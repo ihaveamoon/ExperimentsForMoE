@@ -105,22 +105,23 @@ class Simulate_Env(gym.Env, EzPickle):
         self.current_token = np.zeros((self.batch_size, self.number_of_experts))
         for k in range(self.batch_size):
             for i in range(self.number_of_experts):
-                total_tokens = np.sum(data[k, i, :])  # 专家i发送给所有其他专家的token总数
+                total_tokens = np.sum(data[k, i, :])   # 专家i发送给所有其他专家的token总数
                 self.current_token[k, i] = total_tokens
 
         # 初始化 expert_nodes: historical popularity、current token load
-        self.history_popularity = np.random.rand(self.batch_size, self.number_of_experts).astype(float)
+        self.history_popularity = np.random.uniform(low=0.1, high=1.0, size=(self.batch_size, self.number_of_experts))
         self.expert_nodes = np.concatenate(
             [   self.current_token.reshape(self.batch_size, self.number_of_experts, 1),
                 self.history_popularity.reshape(self.batch_size, self.number_of_experts, 1)],
             axis=2  # 沿最后一个维度拼接
         )
         self.expert_nodes = torch.tensor(self.expert_nodes, dtype=torch.float32)
+        # print('reset() : expert_nodes[0]', self.expert_nodes[0])
 
         # 初始化 GPU nodes: compute speed、utilization、available memory
-        compute_speed = np.random.uniform(low=0.5, high=2.0, size=(self.batch_size, self.number_of_gpus))
+        compute_speed = np.random.uniform(low=60, high=80, size=(self.batch_size, self.number_of_gpus)) # 假设计算速度在 60(TFLOPS) 到 80(TFLOPS)之间
         utilization = np.random.uniform(low=0.1, high=0.9, size=(self.batch_size, self.number_of_gpus))
-        total_memory = np.random.uniform(low=8, high=16, size=(self.batch_size, self.number_of_gpus))  # 假设内存范围在 8GB 到 16GB 之间
+        total_memory = np.random.uniform(low=16, high=24, size=(self.batch_size, self.number_of_gpus))  # 假设内存范围在 16GB 到 24GB 之间
         used_memory = total_memory * utilization
         available_memory = total_memory - used_memory
 
@@ -131,8 +132,8 @@ class Simulate_Env(gym.Env, EzPickle):
             axis=-1)
         self.gpu_nodes = torch.tensor(self.gpu_nodes, dtype=torch.float32)
 
-        # initialize self.mask_expert, mask out current traffic < 200
-        self.mask_expert = self.current_token < 200
+        # initialize self.mask_expert, mask out current traffic < 200 / 1000
+        self.mask_expert = self.current_token < 500
         # initialize self.mask_gpu, mask out utilization > 0.9
         self.mask_gpu = utilization > 0.9
 

@@ -126,10 +126,12 @@ class GNN(nn.Module):
     def __init__(self, feature_dim, num_layers, hidden_dim, output_dim, num_mlp_layers):
         super(GNN, self).__init__()
         self.layers = nn.ModuleList()
-        self.layers.append(GNNLayer(feature_dim, 0.1, hidden_dim, hidden_dim, num_mlp_layers))
-        for _ in range(num_layers - 2):
-            self.layers.append(GNNLayer(hidden_dim, 0.1, hidden_dim, hidden_dim, num_mlp_layers))
-        self.layers.append(GNNLayer(hidden_dim, 0.1, hidden_dim, output_dim, num_mlp_layers))
+        eps_values = np.random.uniform(0.01, 0.1, num_layers)
+
+        self.layers.append(GNNLayer(feature_dim, eps_values[0], hidden_dim, hidden_dim, num_mlp_layers))
+        for i in range(1, num_layers - 1):
+            self.layers.append(GNNLayer(hidden_dim, eps_values[i], hidden_dim, hidden_dim, num_mlp_layers))
+        self.layers.append(GNNLayer(hidden_dim, eps_values[-1], hidden_dim, output_dim, num_mlp_layers))
         if INIT:
             initialize_weights(self)
 

@@ -290,10 +290,10 @@ def main(epochs):
               num_mlp_layers_critic=configs.num_mlp_layers_critic,
               hidden_dim_critic=configs.hidden_dim_critic)
     # 这里是随机生成的样本，需修改模拟器！
-    simu_tokens = 50 # 假设每对专家之间最多有50个token
+    simu_tokens = 200 # 假设每对专家之间最多有200个token
     n_e_per_layer = configs.n_e / configs.n_moe_layer
-    train_dataset = Simulate_Dataset(n_e_per_layer, configs.n_moe_layer, simu_tokens, configs.num_ins, 200)
-    validat_dataset = Simulate_Dataset(n_e_per_layer, configs.n_moe_layer, simu_tokens, 64, 200)
+    train_dataset = Simulate_Dataset(n_e_per_layer, configs.n_moe_layer, simu_tokens, configs.num_ins)
+    validat_dataset = Simulate_Dataset(n_e_per_layer, configs.n_moe_layer, simu_tokens, 64)
     
     # [样本数, 专家数, 专家数]: 样本k中，专家i到专家j需要路由的token数量
     data_loader = DataLoader(train_dataset, batch_size=configs.batch_size)
