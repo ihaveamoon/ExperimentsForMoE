@@ -44,7 +44,6 @@ class Simulate_Env(gym.Env, EzPickle):
         self.expert_adj = []
         # 生成每个GPU上放置的专家id的列表
         vanilla_p = vanilla_placement(self.number_of_experts, self.number_of_gpus) # (n_expert, n_gpu)
-
         # initialize expert_links[batchsize, n_e, n_e, fea_dim] : traffic
         self.expert_links = np.zeros((self.batch_size, self.number_of_experts, self.number_of_experts)) # expert traffic
         self.expert_adj = np.zeros((self.batch_size, self.number_of_experts, self.number_of_experts)) # expert affinity
@@ -104,7 +103,7 @@ class Simulate_Env(gym.Env, EzPickle):
         # 初始化 专家的token数据量
         self.current_token = np.zeros((self.batch_size, self.number_of_experts))
         for k in range(self.batch_size):
-            for i in range(self.number_of_experts):
+            for i in range(self.number_of_experts): 
                 total_tokens = np.sum(data[k, i, :])   # 专家i发送给所有其他专家的token总数
                 self.current_token[k, i] = total_tokens
 
@@ -113,7 +112,7 @@ class Simulate_Env(gym.Env, EzPickle):
         self.expert_nodes = np.concatenate(
             [   self.current_token.reshape(self.batch_size, self.number_of_experts, 1),
                 self.history_popularity.reshape(self.batch_size, self.number_of_experts, 1)],
-            axis=2  # 沿最后一个维度拼接
+            axis=2  # 沿最后一个维度拼接 
         )
         self.expert_nodes = torch.tensor(self.expert_nodes, dtype=torch.float32)
         # print('reset() : expert_nodes[0]', self.expert_nodes[0])
@@ -167,8 +166,8 @@ class Simulate_Env(gym.Env, EzPickle):
                 done = self.done()
                 gpu_done.append(done)
                 continue
-            
-            previous_traffic = np.sum(self.gpu_links[i, :, :, 1])
+
+            previous_traffic = torch.sum(self.gpu_links[i,:,:])
             done = False
             '''若一个专家有多个 expert replica，还需要根据 token routing split 进行更新，待实现'''
             # redundant expert_gpu action makes no effect
@@ -182,7 +181,7 @@ class Simulate_Env(gym.Env, EzPickle):
                 if i == 0:
                     self.step_count += 1
                 
-                previous_placement = self.history_expert_gpu[i, expert_selected, j] # before update 
+                previous_placement = self.history_expert_gpu[i, expert_selected, j] # the chosen expert on gpu j history before update 
                 
                 # update gpu_nodes : compute speed(stable), utilization, available memory
                 old_utilization = deepcopy(self.gpu_nodes[i, j, 1])
@@ -207,11 +206,11 @@ class Simulate_Env(gym.Env, EzPickle):
                 for k in range(self.number_of_gpus):
                     if k != j:
                         if previous_placement == 1:
-                            self.gpu_links[i, j, k, 1] -= self.current_token[i, expert_selected]
-                            self.gpu_links[i, k, j, 1] -= self.current_token[i, expert_selected]
+                            self.gpu_links[i, j, k] -= self.current_token[i, expert_selected]
+                            self.gpu_links[i, k, j] -= self.current_token[i, expert_selected]
                         if gpu_selected[j] == 1:
-                            self.gpu_links[i, j, k, 1] += self.current_token[i, expert_selected]
-                            self.gpu_links[i, k, j, 1] += self.current_token[i, expert_selected]
+                            self.gpu_links[i, j, k] += self.current_token[i, expert_selected]
+                            self.gpu_links[i, k, j] += self.current_token[i, expert_selected]
                 
                 # update mask_gpu
                 self.mask_gpu[i, j] = self.gpu_nodes[i, j, 1] > 0.9
@@ -233,10 +232,11 @@ class Simulate_Env(gym.Env, EzPickle):
                     self.expert_links[i, ii, :] = self.expert_links[i, ii, :] * (1 - alpha)
             
             # update rewards : 如果跨GPU传输的数据量减少，则给予正奖励
-            current_traffic = np.sum(self.gpu_links[i, :, :, 1])
+            current_traffic = torch.sum(self.gpu_links[i, :, :])
             reward = 0
             if current_traffic < previous_traffic:
                 reward = previous_traffic - current_traffic
+            print(reward)
             rewards.append(reward)
             gpu_done.append(done)
 
@@ -247,7 +247,7 @@ class Simulate_Env(gym.Env, EzPickle):
 
         t2 = time.time()
         dur_time = t2-t1
-        print('env step() : dur_time', dur_time)
+        #环境的返回值
         return self.expert_nodes, self.expert_links, self.gpu_nodes, self.gpu_links, self.mask_expert, self.mask_gpu, dur_time, gpu_done, rewards
 
 

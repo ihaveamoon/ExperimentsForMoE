@@ -1,6 +1,6 @@
 from agent_utils import eval_actions
 from agent_utils import select_gpus
-from models.PPO_Actor1 import Expert_Encoder, GPU_Encoder, Expert_Decoder, GPU_Decoder, Expert_Actor, GPU_Actor, MLPCritic
+from models.PPO_Actor2 import Expert_Encoder, GPU_Encoder, Expert_Decoder, GPU_Decoder, Expert_Actor, GPU_Actor, MLPCritic
 from copy import deepcopy
 import torch
 import time
@@ -96,8 +96,8 @@ class PPO:
                                     hidden_dim = configs.hidden_dim,
                                     output_dim = 1,
                                     num_layers = configs.num_mlp_layers_actor).to(device)
-        self.expert_actor = Expert_Actor(self.expert_decoder).to(device)
-        self.gpu_actor = GPU_Actor(self.gpu_decoder).to(device)
+        self.expert_actor = Expert_Actor(self.expert_encoder,self.expert_decoder).to(device)
+        self.gpu_actor = GPU_Actor(self.gpu_encoder,self.gpu_decoder).to(device)
 
         self.policy_critic = MLPCritic(num_layers = num_mlp_layers_critic, 
                                         input_dim = configs.output_dim + configs.n_g, # expert + gpu array
@@ -105,7 +105,7 @@ class PPO:
                                         output_dim = 1).to(device)
         self.policy_old_expert = deepcopy(self.expert_actor)
         self.policy_old_gpu = deepcopy(self.gpu_actor)
-
+    
         self.policy_old_expert.load_state_dict(self.expert_actor.state_dict())
         self.policy_old_gpu.load_state_dict(self.gpu_actor.state_dict())
 
@@ -170,25 +170,20 @@ class PPO:
                 env_expert_links = memories.expert_link_fea[i]
                 env_gpu_nodes = memories.gpu_node_fea[i]
                 env_gpu_links = memories.gpu_link_fea[i]
-                old_expert = memories.expert_selection[i]
                 env_mask_expert = memories.mask_expert[i]
                 env_mask_gpu = memories.mask_gpu[i]
 
-                expert_indices, expert_prob, h_pooled = self.policy_expert(
-                                                        expert_nodes = env_expert_nodes,
-                                                        expert_links = env_expert_links,
-                                                        expert_adj = env_expert_adj,
-                                                        pooling_type = configs.graph_pool_type,
-                                                        mask_expert = env_mask_expert)
-                selected_expert_features = env_expert_nodes[:, expert_indices[0], :] # torch.Size([64, 2])
-                selected_expert_links = env_expert_links[:, expert_indices[0], :] # torch.Size([64, 32])
+                expert_prob,expert_indices = self.policy_expert(
+                                                        node_features = env_expert_nodes,
+                                                        adj_matrix = env_expert_links,
+                                                        mask= env_mask_expert)
+                # selected_expert_features = env_expert_nodes[:, expert_indices[0], :] # torch.Size([64, 2])
+                # selected_expert_links = env_expert_links[:, expert_indices[0], :] # torch.Size([64, 32])
 
-                gpu_bool_array, gpu_prob = self.policy_gpu(
-                                                expert_node = selected_expert_features, 
-                                                expert_links = selected_expert_links,
+                gpu_prob, gpu_bool_array = self.policy_gpu(
                                                 gpu_nodes = env_gpu_nodes, 
                                                 gpu_links = env_gpu_links, 
-                                                pooling_type = configs.graph_pool_type,
+                                                # pooling_type = configs.graph_pool_type,
                                                 mask_gpu_action = env_mask_gpu)
                 print("\nexpert_prob[batch 0] = ", expert_prob[0], "\ngpu_prob[batch 0] = ", gpu_prob[0], "\n")
                 # Combine (action_e, action_g)
@@ -329,8 +324,8 @@ def main(epochs):
             env_mask_expert = torch.from_numpy(np.copy(mask_expert)).to(device)
             env_mask_gpu = torch.from_numpy(np.copy(mask_gpu)).to(device)
             while True:
-                env_expert_links = deepcopy(expert_links).to(device) # torch.Size([batch siez, n_e, n_e])
-                env_expert_nodes = deepcopy(expert_nodes).to(device) # torch.Size([batch siez, n_e, fea_dim = 2])
+                env_expert_links = deepcopy(torch.Tensor(expert_links)).to(device) # torch.Size([batch siez, n_e, n_e])
+                env_expert_nodes = deepcopy(torch.Tensor(expert_nodes)).to(device) # torch.Size([batch siez, n_e, fea_dim = 2])
                 env_expert_adj = deepcopy(expert_adj).to(device) # torch.Size([batch siez, n_e, n_e])
 
                 env_gpu_links = deepcopy(gpu_links).to(device) # torch.Size([batch siez, n_g, n_g])
@@ -342,17 +337,18 @@ def main(epochs):
                 h_expert, h_pooled_expert = ppo.expert_encoder(env_expert_nodes, env_expert_adj)
                 h_gpu, h_pooled_gpu = ppo.gpu_encoder(env_gpu_nodes, env_gpu_links)
                 # print("h_expert = ", h_expert[0], "\n")
-                print("h_gpu = ", h_gpu[0], "\n")
-                print("h_pooled_expert = ", h_pooled_expert[0], "\n")
-                print("h_pooled_gpu = ", h_pooled_gpu[0], "\n")
+                # print("h_gpu = ", h_gpu[0], "\n")
+                # print("h_pooled_expert = ", h_pooled_expert[0], "\n")
+                # print("h_pooled_gpu = ", h_pooled_gpu[0], "\n")
                 # Get action decisions from actors
-                expert_action_probs, selected_expert_id = ppo.expert_actor(h_expert, h_pooled_expert, h_pooled_gpu, env_mask_expert)
+                expert_action_probs, selected_expert_id = ppo.expert_actor(env_expert_nodes, env_expert_adj,env_mask_expert)
                 selected_expert_embeddings = h_expert[torch.arange(h_expert.size(0)), selected_expert_id]
 
-                gpu_action_probs, gpu_bool_array = ppo.gpu_actor(h_gpu, selected_expert_embeddings, h_pooled_gpu, env_mask_gpu)
-                print("expert_action_probs = ", expert_action_probs, "\ngpu_action_probs = ", gpu_action_probs, "\n")
+                gpu_action_probs, gpu_bool_array = ppo.gpu_actor(env_gpu_nodes, env_gpu_links,env_mask_gpu)
+                # print("expert_action_probs = ", expert_action_probs, "\ngpu_action_probs = ", gpu_action_probs, "\n")
                 # print("selected_expert_id = ", selected_expert_id, "\ngpu_bool_array = ", gpu_bool_array, "\n")
-
+                print(selected_expert_id.shape)
+                print(gpu_bool_array.shape)
                 # 记录过程数据
                 memory.expert_selection.append(selected_expert_id)
                 memory.gpu_selection.append(gpu_bool_array)
@@ -366,16 +362,16 @@ def main(epochs):
                 gpu_log_prob.append(gpu_action_probs)
                 
                 # 向环境提交选择的动作和机器，接收新的状态、奖励和完成标志等信息, 待修改！！！
-                expert_nodes, expert_links, expert_affinity, gpu_nodes, gpu_links, mask_expert, mask_gpu, dur_time, gpu_done, reward = env.step(expert_indices.cpu().numpy(),
+                expert_nodes, expert_links, gpu_nodes, gpu_links, mask_expert, mask_gpu, dur_time, gpu_done, reward = env.step(selected_expert_id,
                                                                                                 gpu_bool_array,
                                                                                                 data)
                 ep_rewards += reward
 
                 env_rewards.append(deepcopy(reward))
                 env_done.append(deepcopy(gpu_done))
-
+                print('env step() : dur_time', dur_time)
                 if env.done(): # mask_gpu 没有可用的GPU时，结束
-                    continue
+                    break
             
             memory.mask_expert.append(env_mask_expert)
             memory.mask_gpu.append(env_mask_gpu)

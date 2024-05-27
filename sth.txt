@@ -1,0 +1,16 @@
+#stage
+ep:
+batch forward ->
+
+gradient backward ->
+
+(parallel ?)RL inferrence+training->
+
+smart_schedule ->
+
+...
+
+# 如何设计何时进行专家的调度
+# RL每次选出一个专家在某个gpu上删除或者放置，目的是为了降低all2all通信量的同时提高throughput，这时判断是否进行调度应该考虑
+1.switch cost
+2.
