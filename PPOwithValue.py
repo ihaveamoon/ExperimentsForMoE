@@ -1,6 +1,6 @@
 from agent_utils import eval_actions
 from agent_utils import select_gpus
-from models.PPO_Actor1 import Expert_Encoder, GPU_Encoder, Expert_Decoder, GPU_Decoder, Expert_Actor, GPU_Actor, MLPCritic
+from models.PPO_Actor1 import Expert_Encoder, GPU_Encoder, Expert_Actor, GPU_Actor, MLPCritic
 from copy import deepcopy
 import torch
 import time
@@ -86,33 +86,36 @@ class PPO:
                                     output_dim=configs.gpu_output_dim,
                                     num_layers = configs.num_layers,
                                     num_mlp_layers=configs.num_mlp_layers_feature_extract).to(device)
-        self.expert_decoder = Expert_Decoder(
+        self.expert_actor = Expert_Actor(
                                     input_dim = configs.expert_output_dim + configs.gpu_output_dim + configs.expert_output_dim,
                                     hidden_dim = configs.hidden_dim,
                                     output_dim = 1,
                                     num_layers = configs.num_mlp_layers_actor).to(device)
-        self.gpu_decoder = GPU_Decoder(
+        self.gpu_actor = GPU_Actor(
                                     input_dim = configs.expert_output_dim + configs.gpu_output_dim + configs.gpu_output_dim,
                                     hidden_dim = configs.hidden_dim,
                                     output_dim = 1,
                                     num_layers = configs.num_mlp_layers_actor).to(device)
-        self.expert_actor = Expert_Actor(self.expert_decoder).to(device)
-        self.gpu_actor = GPU_Actor(self.gpu_decoder).to(device)
 
         self.policy_critic = MLPCritic(num_layers = num_mlp_layers_critic, 
                                         input_dim = configs.output_dim + configs.n_g, # expert + gpu array
                                         hidden_dim = configs.hidden_dim, 
                                         output_dim = 1).to(device)
+        
         self.policy_old_expert = deepcopy(self.expert_actor)
         self.policy_old_gpu = deepcopy(self.gpu_actor)
 
         self.policy_old_expert.load_state_dict(self.expert_actor.state_dict())
         self.policy_old_gpu.load_state_dict(self.gpu_actor.state_dict())
 
+        self.expert_encoder_optimizer = torch.optim.Adam(self.expert_encoder.parameters(), lr=lr)
+        self.gpu_encoder_optimizer = torch.optim.Adam(self.gpu_encoder.parameters(), lr=lr)
         self.expert_optimizer = torch.optim.Adam(self.expert_actor.parameters(), lr=lr)
         self.gpu_optimizer = torch.optim.Adam(self.gpu_actor.parameters(), lr=lr)
         self.value_optimizer = torch.optim.Adam(self.policy_critic.parameters(), lr=lr)
 
+        self.expert_encoder_scheduler = torch.optim.lr_scheduler.StepLR(self.expert_encoder_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
+        self.gpu_encoder_scheduler = torch.optim.lr_scheduler.StepLR(self.gpu_encoder_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
         self.expert_scheduler = torch.optim.lr_scheduler.StepLR(self.expert_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
         self.gpu_scheduler = torch.optim.lr_scheduler.StepLR(self.gpu_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
         self.value_scheduler = torch.optim.lr_scheduler.StepLR(self.value_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
@@ -341,15 +344,16 @@ def main(epochs):
                 # Encode expert and GPU states
                 h_expert, h_pooled_expert = ppo.expert_encoder(env_expert_nodes, env_expert_adj)
                 h_gpu, h_pooled_gpu = ppo.gpu_encoder(env_gpu_nodes, env_gpu_links)
-                # print("h_expert = ", h_expert[0], "\n")
+                print("h_expert = ", h_expert[0], "\n")
                 print("h_gpu = ", h_gpu[0], "\n")
                 print("h_pooled_expert = ", h_pooled_expert[0], "\n")
                 print("h_pooled_gpu = ", h_pooled_gpu[0], "\n")
                 # Get action decisions from actors
                 expert_action_probs, selected_expert_id = ppo.expert_actor(h_expert, h_pooled_expert, h_pooled_gpu, env_mask_expert)
                 selected_expert_embeddings = h_expert[torch.arange(h_expert.size(0)), selected_expert_id]
+                print("selected_expert_embeddings = ", selected_expert_embeddings[0], "\n")
 
-                gpu_action_probs, gpu_bool_array = ppo.gpu_actor(h_gpu, selected_expert_embeddings, h_pooled_gpu, env_mask_gpu)
+                gpu_action_probs, gpu_bool_array = ppo.gpu_actor(h_gpu, h_pooled_gpu, selected_expert_embeddings, env_mask_gpu)
                 print("expert_action_probs = ", expert_action_probs, "\ngpu_action_probs = ", gpu_action_probs, "\n")
                 # print("selected_expert_id = ", selected_expert_id, "\ngpu_bool_array = ", gpu_bool_array, "\n")
 

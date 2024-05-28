@@ -153,19 +153,19 @@ class Expert_Encoder(nn.Module):
         global_embedding = node_embeddings.mean(dim=1)
         return node_embeddings, global_embedding
 
-class Expert_Decoder(nn.Module):
+class Expert_Actor(nn.Module):
     """ Multi-Layer MLP Actor for decoding actions based on combined embeddings """
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
-        super(Expert_Decoder, self).__init__()
+        super(Expert_Actor, self).__init__()
         self.mlp = MLPbm(input_dim, hidden_dim, output_dim, num_layers)
         if INIT:
             initialize_weights(self)
 
-    def forward(self, h_node, h_global, u, mask):
+    def forward(self, h_node, h_global, h_pooled_gpu, mask):
         # print(f"Expert_Decoder forward: h_node.shape = {h_node.shape}, h_global.shape = {h_global.shape}, u.shape = {u.shape}")
         # Expand h_global and concatenate it with h_node and u
         h_global_expanded = h_global.unsqueeze(1).expand(-1, h_node.size(1), -1)
-        u_expanded = u.unsqueeze(1).expand(-1, h_node.size(1), -1)
+        u_expanded = h_pooled_gpu.unsqueeze(1).expand(-1, h_node.size(1), -1)
         h_combined = torch.cat([h_node, h_global_expanded, u_expanded], dim=-1)
         # print(f"h_combined.shape = {h_combined.shape}")
 
@@ -177,19 +177,7 @@ class Expert_Decoder(nn.Module):
         # Masking and softmax
         action_scores = action_scores.masked_fill(mask, float('-inf'))
         action_probs = F.softmax(action_scores, dim=1)
-        return action_probs
-
-class Expert_Actor(nn.Module):
-    def __init__(self, decoder):
-        super(Expert_Actor, self).__init__()
-        self.decoder = decoder
-        if INIT:
-            initialize_weights(self)
-
-    def forward(self, h_node, h_global, h_pooled_gpu, mask):
-        # Decode to get action probabilities
-        action_probs = self.decoder(h_node, h_global, h_pooled_gpu, mask)
-
+        
         # Sampling or greedy action selection
         if self.training:  # Sampling strategy during training
             distribution = torch.distributions.Categorical(action_probs)
@@ -198,6 +186,7 @@ class Expert_Actor(nn.Module):
             action = torch.argmax(action_probs, dim=1)
 
         return action_probs, action
+
 
 
 
@@ -214,44 +203,30 @@ class GPU_Encoder(nn.Module):
         global_embedding = node_embeddings.mean(dim=1)
         return node_embeddings, global_embedding
 
-class GPU_Decoder(nn.Module):
-    """ Decoder to compute GPU action scores based on combined embeddings """
+class GPU_Actor(nn.Module):
+    """ Actor to compute GPU action scores based on combined embeddings """
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
-        super(GPU_Decoder, self).__init__()
+        super(GPU_Actor, self).__init__()
         self.mlp = MLPtanh(input_dim, hidden_dim, output_dim, num_layers)
         if INIT:
             initialize_weights(self)
 
-    def forward(self, h_node, h_global, u, mask):
-        # print(f"GPU_Decoder forward: h_node[0] = {h_node[0]}, h_global[0] = {h_global}[0], u[0] = {u[0]}")
-        # Expand h_global and concatenate it with h_node and u
+    def forward(self, h_node, h_global, h_expert, mask):
         h_global_expanded = h_global.unsqueeze(1).expand(-1, h_node.size(1), -1)
-        u_expanded = u.unsqueeze(1).expand(-1, h_node.size(1), -1)
+        u_expanded = h_expert.unsqueeze(1).expand(-1, h_node.size(1), -1)
         h_combined = torch.cat([h_node, h_global_expanded, u_expanded], dim=-1)
-        # print(f"h_combined.shape = {h_combined.shape}")
         batch_size, gpu_num, feature_dim = h_combined.size()
         h_combined = h_combined.view(batch_size * gpu_num, feature_dim)
         action_scores = self.mlp(h_combined).view(batch_size, gpu_num, -1).squeeze(-1)
         
-        # action_scores = self.mlp(h_combined).squeeze(-1)
-        
         # Masking and softmax
         action_scores = action_scores.masked_fill(mask, float('-inf'))
         action_probs = F.softmax(action_scores, dim=1)
-        return action_probs
 
-class GPU_Actor(nn.Module):
-    def __init__(self, decoder):
-        super(GPU_Actor, self).__init__()
-        self.decoder = decoder
-        if INIT:
-            initialize_weights(self)
-
-    def forward(self, h_gpu, h_pooled_expert, h_pooled_gpu, mask):
-        action_probs = self.decoder(h_gpu, h_pooled_expert, h_pooled_gpu, mask)
         # Determine expand/shrink actions
         gpu_actions = action_probs > 0.5
         return action_probs, gpu_actions
+
 
 
 
