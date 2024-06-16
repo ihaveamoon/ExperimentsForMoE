@@ -4,6 +4,7 @@ parser = argparse.ArgumentParser(description='Arguments for ppo_jssp')
 # args for device
 parser.add_argument('--device', type=str, default="cuda", help='Number of jobs of instances')
 # args for env
+parser.add_argument('--PolicyStep', type=int, default=10, help='the total step of old actor generate policies')
 parser.add_argument('--n_moe_layer', type=int, default=4, help='Number of MoE layers')
 parser.add_argument('--n_e', type=int, default=4*8, help='Number of experts per layer')
 parser.add_argument('--n_g', type=int, default=4, help='Number of GPUs')

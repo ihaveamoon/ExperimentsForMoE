@@ -1,6 +1,6 @@
 from agent_utils import eval_actions
 from agent_utils import select_gpus
-from models.PPO_Actor2 import Expert_Encoder, GPU_Encoder, Expert_Decoder, GPU_Decoder, Expert_Actor, GPU_Actor, MLPCritic
+from models.PPO_Actor1 import Expert_Encoder, GPU_Encoder, Expert_Actor, GPU_Actor, MLPCritic,EXPERT_GPU_ACTOR
 from copy import deepcopy
 import torch
 import time
@@ -12,6 +12,7 @@ from validation import validate
 import os
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LambdaLR
+from tqdm import tqdm 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -69,61 +70,54 @@ class PPO:
                  hidden_dim_actor,
                  num_mlp_layers_critic,
                  hidden_dim_critic,
+                 *args,
+                 **kwargs
                  ):
         self.lr = lr
+        
         self.gamma = gamma
+        
         self.eps_clip = eps_clip
+        
         self.k_epochs = k_epochs
-        self.expert_encoder = Expert_Encoder(
+
+        self.expert_gpu_actor = EXPERT_GPU_ACTOR(
                                     expert_feature_dim = configs.expert_feature_dim,
-                                    hidden_dim = configs.hidden_dim,
-                                    output_dim=configs.expert_output_dim,
-                                    num_layers = configs.num_layers, 
-                                    num_mlp_layers = configs.num_mlp_layers_feature_extract).to(device)
-        self.gpu_encoder = GPU_Encoder(
                                     gpu_feature_dim = configs.gpu_feature_dim,
-                                    hidden_dim = configs.hidden_dim, 
-                                    output_dim=configs.gpu_output_dim,
-                                    num_layers = configs.num_layers,
-                                    num_mlp_layers=configs.num_mlp_layers_feature_extract).to(device)
-        self.expert_decoder = Expert_Decoder(
-                                    input_dim = configs.expert_output_dim + configs.gpu_output_dim + configs.expert_output_dim,
                                     hidden_dim = configs.hidden_dim,
-                                    output_dim = 1,
-                                    num_layers = configs.num_mlp_layers_actor).to(device)
-        self.gpu_decoder = GPU_Decoder(
-                                    input_dim = configs.expert_output_dim + configs.gpu_output_dim + configs.gpu_output_dim,
-                                    hidden_dim = configs.hidden_dim,
-                                    output_dim = 1,
-                                    num_layers = configs.num_mlp_layers_actor).to(device)
-        self.expert_actor = Expert_Actor(self.expert_encoder,self.expert_decoder).to(device)
-        self.gpu_actor = GPU_Actor(self.gpu_encoder,self.gpu_decoder).to(device)
+                                    expert_output_dim=configs.expert_output_dim,
+                                    gpu_output_dim=configs.gpu_output_dim,
+                                    num_layers = configs.num_layers, 
+                                    num_encoder_layers = configs.num_mlp_layers_feature_extract,
+                                    num_decoder_layers = configs.num_mlp_layers_actor,
+                                    num_critic_layers  = configs.num_mlp_layers_critic,
+                                    num_experts = configs.n_e,
+                                    num_gpus = configs.n_g).to(device)
+        
 
         self.policy_critic = MLPCritic(num_layers = num_mlp_layers_critic, 
                                         input_dim = configs.output_dim + configs.n_g, # expert + gpu array
                                         hidden_dim = configs.hidden_dim, 
                                         output_dim = 1).to(device)
-        self.policy_old_expert = deepcopy(self.expert_actor)
-        self.policy_old_gpu = deepcopy(self.gpu_actor)
-    
-        self.policy_old_expert.load_state_dict(self.expert_actor.state_dict())
-        self.policy_old_gpu.load_state_dict(self.gpu_actor.state_dict())
+        
+        self.old_policy = deepcopy(self.expert_gpu_actor)
 
-        self.expert_optimizer = torch.optim.Adam(self.expert_actor.parameters(), lr=lr)
-        self.gpu_optimizer = torch.optim.Adam(self.gpu_actor.parameters(), lr=lr)
+        self.old_policy.load_state_dict(self.expert_gpu_actor.state_dict())
+
+
+        self.expert_gpu_optimizer = torch.optim.Adam(self.expert_gpu_actor.parameters(), lr=lr)
+
         self.value_optimizer = torch.optim.Adam(self.policy_critic.parameters(), lr=lr)
 
-        self.expert_scheduler = torch.optim.lr_scheduler.StepLR(self.expert_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
-        self.gpu_scheduler = torch.optim.lr_scheduler.StepLR(self.gpu_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
+        self.expert_gpu_scheduler = torch.optim.lr_scheduler.StepLR(self.expert_gpu_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
+       
         self.value_scheduler = torch.optim.lr_scheduler.StepLR(self.value_optimizer, step_size=configs.decay_step_size, gamma=configs.decay_ratio)
 
         self.MSE = nn.MSELoss()
 
 
     def update(self, memories, epoch):
-        '''self.policy_expert.train()
-        self.policy_gpu.train()
-        self.policy_critic.train()'''
+
 
         vloss_coef = configs.vloss_coef
         ploss_coef = configs.ploss_coef
@@ -172,22 +166,17 @@ class PPO:
                 env_gpu_links = memories.gpu_link_fea[i]
                 env_mask_expert = memories.mask_expert[i]
                 env_mask_gpu = memories.mask_gpu[i]
+                expert_prob,expert_indices,gpu_prob,gpu_indices,v= self.expert_gpu_actor(ep_nodes=env_expert_nodes,
+                                                                                           ep_links=env_expert_links,
+                                                                                           gp_nodes=env_gpu_nodes, 
+                                                                                           gp_links=env_gpu_links,
+                                                                                           mask_ep=env_mask_expert,
+                                                                                           mask_gp=env_mask_gpu,
+                                                                                           old_policy = False)
 
-                expert_prob,expert_indices = self.policy_expert(
-                                                        node_features = env_expert_nodes,
-                                                        adj_matrix = env_expert_links,
-                                                        mask= env_mask_expert)
-                # selected_expert_features = env_expert_nodes[:, expert_indices[0], :] # torch.Size([64, 2])
-                # selected_expert_links = env_expert_links[:, expert_indices[0], :] # torch.Size([64, 32])
-
-                gpu_prob, gpu_bool_array = self.policy_gpu(
-                                                gpu_nodes = env_gpu_nodes, 
-                                                gpu_links = env_gpu_links, 
-                                                # pooling_type = configs.graph_pool_type,
-                                                mask_gpu_action = env_mask_gpu)
                 print("\nexpert_prob[batch 0] = ", expert_prob[0], "\ngpu_prob[batch 0] = ", gpu_prob[0], "\n")
-                # Combine (action_e, action_g)
-                critic_input = torch.cat([h_pooled, gpu_bool_array.float()], dim=1)
+
+                critic_input = torch.cat([expert_indices.expand(-1,gpu_indices.size(1)).float(), gpu_indices.float()], dim=1)
                 v = self.policy_critic(critic_input)
                 val.append(v)
 
@@ -239,27 +228,18 @@ class PPO:
             total_expert_loss = ploss_coef * expert_loss_sum / configs.batch_size
             total_gpu_loss = ploss_coef * gpu_loss_sum / configs.batch_size
             total_value_loss = vloss_coef * value_loss_sum / configs.batch_size
-
+            action_loss = total_gpu_loss + total_expert_loss
             # take gradient step, scheduler.step()
-            self.expert_optimizer.zero_grad()
-            total_expert_loss.backward(retain_graph=True)
-            self.expert_optimizer.step()
-
-            self.gpu_optimizer.zero_grad()
-            total_gpu_loss.backward(retain_graph=True)
-            self.gpu_optimizer.step()
+            self.expert_gpu_optimizer.zero_grad()
+            action_loss.backward(retain_graph = True)
+            self.expert_gpu_optimizer.step()
 
             self.value_optimizer.zero_grad()
             total_value_loss.backward()
             self.value_optimizer.step()
-
-            # Copy new weights into old policy
-            self.policy_old_expert.load_state_dict(self.policy_expert.state_dict())
-            self.policy_old_gpu.load_state_dict(self.policy_gpu.state_dict())
             
             if configs.decayflag:
-                self.expert_scheduler.step()
-                self.gpu_scheduler.step()
+                self.expert_gpu_scheduler.step()
                 self.value_scheduler.step()
 
             return expert_loss_sum.mean().item(), gpu_loss_sum.mean().item(), value_loss_sum.mean().item()
@@ -284,6 +264,7 @@ def main(epochs):
               hidden_dim_actor=configs.hidden_dim_actor,
               num_mlp_layers_critic=configs.num_mlp_layers_critic,
               hidden_dim_critic=configs.hidden_dim_critic)
+    
     # 这里是随机生成的样本，需修改模拟器！
     simu_tokens = 200 # 假设每对专家之间最多有200个token
     n_e_per_layer = configs.n_e / configs.n_moe_layer
@@ -295,10 +276,9 @@ def main(epochs):
     valid_loader = DataLoader(validat_dataset, batch_size=configs.batch_size)
 
     record = 1000000
-    for epoch in range(epochs):
+    for _ in range(epochs):
         memory = Memory() # 存储过程数据
-        ppo.policy_old_expert.train()
-        ppo.policy_old_gpu.train()
+        ppo.old_policy.eval()
 
         times, losses, rewards2, critic_rewards = [], [], [], []
         start = time.time()
@@ -307,11 +287,12 @@ def main(epochs):
         expert_losses, gpu_losses, rewards, critic_loss = [], [], [], []
         for batch_idx, batch in enumerate(data_loader):
             env = Simulate_Env(configs.n_moe_layer, configs.n_e, configs.n_g)
-            data = batch.numpy() # torch.Size([64, 32, 32])
-
+            data = batch.numpy() # torch.Size([64, 32, 32]),token_log
+            states = data.shape[0]
+            state = 0
             # env.reset函数
-            expert_links, expert_nodes, expert_adj, gpu_links, gpu_nodes, mask_expert, mask_gpu = env.reset(data)
-
+            expert_links, expert_nodes, expert_adj, gpu_links, gpu_nodes, mask_expert, mask_gpu = env.reset(data[state,:,:])
+            state += 1
             expert_log_prob = []
             gpu_log_prob = []
             env_rewards = []
@@ -323,53 +304,44 @@ def main(epochs):
             
             env_mask_expert = torch.from_numpy(np.copy(mask_expert)).to(device)
             env_mask_gpu = torch.from_numpy(np.copy(mask_gpu)).to(device)
-            while True:
+            #收集action对应的数据,对每个batch产生策略
+            for state in range(1,states):
                 env_expert_links = deepcopy(torch.Tensor(expert_links)).to(device) # torch.Size([batch siez, n_e, n_e])
                 env_expert_nodes = deepcopy(torch.Tensor(expert_nodes)).to(device) # torch.Size([batch siez, n_e, fea_dim = 2])
-                env_expert_adj = deepcopy(expert_adj).to(device) # torch.Size([batch siez, n_e, n_e])
 
                 env_gpu_links = deepcopy(gpu_links).to(device) # torch.Size([batch siez, n_g, n_g])
                 env_gpu_nodes = deepcopy(gpu_nodes).to(device) # torch.Size([batch siez, n_g, fea_dim = 3])
-                # print("env_gpu_links = ", env_gpu_links[0][0], "\n")
-                # print("env_gpu_nodes = ", env_gpu_nodes[0][0], "\n")
 
-                # Encode expert and GPU states
-                h_expert, h_pooled_expert = ppo.expert_encoder(env_expert_nodes, env_expert_adj)
-                h_gpu, h_pooled_gpu = ppo.gpu_encoder(env_gpu_nodes, env_gpu_links)
-                # print("h_expert = ", h_expert[0], "\n")
-                # print("h_gpu = ", h_gpu[0], "\n")
-                # print("h_pooled_expert = ", h_pooled_expert[0], "\n")
-                # print("h_pooled_gpu = ", h_pooled_gpu[0], "\n")
-                # Get action decisions from actors
-                expert_action_probs, selected_expert_id = ppo.expert_actor(env_expert_nodes, env_expert_adj,env_mask_expert)
-                selected_expert_embeddings = h_expert[torch.arange(h_expert.size(0)), selected_expert_id]
+                expert_prob,expert_index,gpu_prob,gpu_index= ppo.old_policy(ep_nodes=env_expert_nodes.unsqueeze(0),
+                                                                            ep_links=env_expert_links.unsqueeze(0),
+                                                                            gp_nodes=env_gpu_nodes.unsqueeze(0), 
+                                                                            gp_links=env_gpu_links.unsqueeze(0),
+                                                                            mask_ep=env_mask_expert.unsqueeze(0),
+                                                                            mask_gp=env_mask_gpu.unsqueeze(0),
+                                                                            old_policy = True)
 
-                gpu_action_probs, gpu_bool_array = ppo.gpu_actor(env_gpu_nodes, env_gpu_links,env_mask_gpu)
-                # print("expert_action_probs = ", expert_action_probs, "\ngpu_action_probs = ", gpu_action_probs, "\n")
-                # print("selected_expert_id = ", selected_expert_id, "\ngpu_bool_array = ", gpu_bool_array, "\n")
-                print(selected_expert_id.shape)
-                print(gpu_bool_array.shape)
-                # 记录过程数据
-                memory.expert_selection.append(selected_expert_id)
-                memory.gpu_selection.append(gpu_bool_array)
+                memory.expert_selection.append(expert_index)
+                memory.gpu_selection.append(gpu_index)
 
                 memory.expert_node_fea.append(env_expert_nodes)
                 memory.expert_link_fea.append(env_expert_links)
-                expert_log_prob.append(expert_action_probs)
+                expert_log_prob.append(expert_prob)
                 
                 memory.gpu_node_fea.append(gpu_nodes)
                 memory.gpu_link_fea.append(gpu_links)
-                gpu_log_prob.append(gpu_action_probs)
-                
+                gpu_log_prob.append(gpu_prob)
+                # print("ei:",expert_index)
+                # print("gi:",gpu_index)
                 # 向环境提交选择的动作和机器，接收新的状态、奖励和完成标志等信息, 待修改！！！
-                expert_nodes, expert_links, gpu_nodes, gpu_links, mask_expert, mask_gpu, dur_time, gpu_done, reward = env.step(selected_expert_id,
-                                                                                                gpu_bool_array,
+                expert_nodes, expert_links, gpu_nodes, gpu_links, mask_expert, mask_gpu, dur_time, gpu_done, reward = env.step(expert_index,
+                                                                                                gpu_index,
                                                                                                 data)
                 ep_rewards += reward
 
                 env_rewards.append(deepcopy(reward))
                 env_done.append(deepcopy(gpu_done))
                 print('env step() : dur_time', dur_time)
+
                 if env.done(): # mask_gpu 没有可用的GPU时，结束
                     break
             
@@ -385,12 +357,15 @@ def main(epochs):
 
             # rewards
             ep_rewards -= env.posRewards
-            # ppo.update
+            # ppo.update更新网络参数
             torch.autograd.set_detect_anomaly(True)
             expert_loss, gpu_loss, value_loss = ppo.update(memory, batch_idx)
+            ppo.old_policy.load_state_dict(ppo.expert_gpu_actor.state_dict())
 
             memory.clear_memory()
+            
             mean_time = np.mean(ep_rewards)
+            
             log.append([batch_idx, mean_time])
 
             # 定期日志记录
@@ -401,12 +376,17 @@ def main(epochs):
                 file_writing_obj.write(str(log))
 
             rewards.append(np.mean(ep_rewards).item())
+            
             expert_losses.append(expert_loss)
+            
             gpu_losses.append(gpu_loss)
+            
             critic_loss.append(value_loss)
 
             cost = time.time() - start
+            
             costs.append(cost)
+            
             step = 20
 
             filepath = 'saved_network'

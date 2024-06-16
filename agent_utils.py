@@ -5,11 +5,13 @@ import torch
 def vanilla_placement(number_of_experts, number_of_gpus):
     # 初始化一个全False的布尔数组
     vanilla_p = np.zeros((number_of_experts, number_of_gpus), dtype=bool)
-    
+    threshold = number_of_experts // number_of_gpus
     # 随机分配每个专家到一个GPU
     for expert_id in range(number_of_experts):
-        # 随机选择一个GPU
-        gpu_id = np.random.choice(number_of_gpus)
+        # 按照序号选择一个GPU
+        gpu_id = expert_id // threshold
+        if gpu_id >= number_of_gpus:
+            gpu_id = number_of_gpus - 1
         vanilla_p[expert_id][gpu_id] = True
     
     return vanilla_p
