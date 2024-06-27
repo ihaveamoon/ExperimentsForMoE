@@ -2,9 +2,11 @@ from torch.distributions.categorical import Categorical
 import numpy as np
 import torch
 
-def vanilla_placement(number_of_experts, number_of_gpus):
+def vanilla_placement(number_of_experts, number_of_gpus,number_of_replicas):
     # 初始化一个全False的布尔数组
     vanilla_p = np.zeros((number_of_experts, number_of_gpus), dtype=bool)
+    repilca_p = [[] for _ in range(number_of_experts)]
+
     threshold = number_of_experts // number_of_gpus
     # 随机分配每个专家到一个GPU
     for expert_id in range(number_of_experts):
@@ -13,8 +15,9 @@ def vanilla_placement(number_of_experts, number_of_gpus):
         if gpu_id >= number_of_gpus:
             gpu_id = number_of_gpus - 1
         vanilla_p[expert_id][gpu_id] = True
-    
-    return vanilla_p
+
+
+    return vanilla_p,repilca_p
 
 def select_gpus(p, prob_high, prob_low):
     gpu_selection = torch.full_like(p, -1, dtype=torch.int)  # -1 表示不确定

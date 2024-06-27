@@ -240,6 +240,7 @@ class EXPERT_GPU_ACTOR(nn.Module):
                  num_critic_layers,
                  num_experts,
                  num_gpus,
+                 old_policy,
                  *args,
                  **kwargs):
         super(EXPERT_GPU_ACTOR,self).__init__()
@@ -261,7 +262,7 @@ class EXPERT_GPU_ACTOR(nn.Module):
                                     output_dim=1,num_layers=num_decoder_layers)
         
         self.critic = MLPCritic(num_layers=num_critic_layers,
-                                inputdim=num_experts*expert_output_dim+num_gpus*gpu_output_dim,
+                                input_dim=num_experts*expert_output_dim+num_gpus*gpu_output_dim,
                                 hidden_dim=hidden_dim,
                                 output_dim=1)
         

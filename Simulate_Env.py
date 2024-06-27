@@ -76,7 +76,7 @@ class Simulate_Env(gym.Env, EzPickle):
 
 
     @override
-    def reset(self, data): 
+    def reset(self, data,number_of_replicas = 4): 
         # 重置各类计数器和矩阵，为新的环境做准备
         # data (n_expert, n_expert)
         '''
@@ -84,6 +84,10 @@ class Simulate_Env(gym.Env, EzPickle):
         self.expert_aff:np array ,the affinity between experts
         self.gpu_link:np array ,the traffic between gpus
         self.current_token:np array,the token scattered to different experts
+        有几个硬性的变量需要设计：
+        1.mask操作，如何mask，如何计算显存的变化
+        2.current_token是否和history_popularity重复了
+        history_popularity指什么，若是指历史数据，应该在step的初始阶段
         '''
 
         experts_per_layer = self.number_of_experts // self.n_moe_layer
@@ -94,11 +98,11 @@ class Simulate_Env(gym.Env, EzPickle):
         # rewards to be return after action was commited
         self.posRewards = 0
         # generate the pair of expert bonded to gpu
-        vanilla_p = vanilla_placement(self.number_of_experts, self.number_of_gpus) # (n_expert, n_gpu)
+        self.vanilla_p,self.replica_p = vanilla_placement(self.number_of_experts, self.number_of_gpus,number_of_replicas) # (n_expert, n_gpu)
         # initialize the traffic between experts,the affinity between experts
         self.expert_traf,self.expert_aff = GenerateAFandTR(data,self.n_moe_layer,experts_per_layer)
         # initialize history_expert_gpu,history_gpu_expert according to vanilla_placement
-        self.history_expert_gpu = GeneratePair(self.number_of_experts,self.number_of_gpus,vanilla_p)        
+        self.history_expert_gpu = GeneratePair(self.number_of_experts,self.number_of_gpus,self.vanilla_p)        
         # initialize self.gpu_links matrix : traffic rate
         self.gpu_links,self.gpu_total_traffic = GenerateGPtraffic(data,self.number_of_gpus,
                                                                   self.number_of_experts,self.history_expert_gpu)
@@ -135,8 +139,11 @@ class Simulate_Env(gym.Env, EzPickle):
 
         # 初始化 GPU nodes: compute speed、utilization、available memory
         compute_speed = np.random.uniform(low=60, high=80, size=(self.number_of_gpus,1)) # 假设计算速度在 60(TFLOPS) 到 80(TFLOPS)之间
-        utilization = np.random.uniform(low=0.1, high=0.9, size=(self.number_of_gpus,1)) # 内存使用率
+        utilization = np.random.uniform(low=0.5, high=0.9, size=(self.number_of_gpus,1)) # 内存使用率
         total_memory = np.random.uniform(low=16, high=24, size=(self.number_of_gpus,1))  # 假设内存范围在 16GB 到 24GB 之间
+        total_memory = np.zeros((self.number_of_gpus,1))
+        total_memory.fill(24)                               #设置显存总容量为24GB
+        # utilization = np.zeros((self.number_of_gpus,1)).fill(0.5)
         used_memory = total_memory * utilization
         available_memory = total_memory - used_memory
 
@@ -162,108 +169,112 @@ class Simulate_Env(gym.Env, EzPickle):
 
     @override
     def step(self, expert_indices, gpu_bool_array, data, gantt_plt=None):
-        # 执行动作，维护和更新环境状态，计算奖励
-        t1 = time.time()
-        rewards, gpu_done = [],[]
-        for i in range(self.batch_size):#对于每轮输入的token数据以及expert,gpu之间的关系,按照策略进行调整，并且得到奖励
-            expert_selected = expert_indices[i]
-            gpu_selected = gpu_bool_array[i]
+        '''
+        G : GPU集合
+        P : palce policy
 
-            # update mask_expert :
-            popularity_threshold = 0.1 # 假设我们根据 history_popularity 小于某个阈值来决定是否屏蔽
-            for expert in range(self.number_of_experts):
-                if self.history_popularity[i, expert] < popularity_threshold:
-                    self.mask_expert[i, expert] = True
-                else:
-                    self.mask_expert[i, expert] = False
-            # 检查 expert_selected 是否被屏蔽，如果是则跳过本次循环
-            if self.mask_expert[i, expert_selected]:
-                rewards.append(0)
-                done = self.done()
-                gpu_done.append(done)
-                continue
+        '''
+        # 执行动作，维护和更新环境状态，计算奖励,注意,此时向环境提交了动作，
+        # 应该先执行动作，再进行一个batch的训练，从而更新奖励，我们需要设计一个计算延迟的公式，还有一个计算switchcost的公式
+        reward = 0
+        #对于每轮输入的token数据以及expert,gpu之间的关系,按照策略进行调整，并且得到奖励
+        expert_selected = expert_indices
+        gpu_selected = gpu_bool_array.squeeze()
+        print(gpu_selected)
+        self.total_cost = 0
+        self.current_token = data
+        # update mask_expert :
+        popularity_threshold = 0.1 # 假设我们根据 history_popularity 小于某个阈值来决定是否屏蔽
+        # 在环境更新前,actor根据之前的环境已经生成了带mask的action，因此判断一个expert/gpu是不是被mask应该放到新环境之后再说
 
-            previous_traffic = torch.sum(self.gpu_links[i,:,:])
-            done = False
-            '''若一个专家有多个 expert replica，还需要根据 token routing split 进行更新，待实现'''
-            # redundant expert_gpu action makes no effect
-            for j in range(self.number_of_gpus):
-                if self.history_expert_gpu[i][expert_selected][j] == gpu_selected[j]:
+        #在gpu = True的位置上添加专家副本，同时如果对应的gpu为False,我们缩减掉该位置上的expert
+        expand_cost = 1111
+        shrink_cost = 0
+        throughput = 10220
+        #按照置空法实现replica增加和减少，data生成需要加噪，涵盖所有真实的变化
+        print(self.mask_expert)
+        print(self.mask_gpu)
+                # update expert_nodes -> history popularity
+        for expert in range(self.number_of_experts):
+            self.history_popularity[expert] = self.history_popularity[expert] * 0.9 + self.current_token[expert] * 0.1
+
+        if self.mask_expert[expert_selected] == True:
+            for gpu in range(self.number_of_gpus):
+                if self.mask_gpu[gpu] == True:
                     continue
-                # 检查 gpu_selected 是否被屏蔽，如果是则跳过本次循环
-                if self.mask_gpu[i, j]:
-                    continue
-                # UPDATE BASIC INFO 
-                if i == 0:
-                    self.step_count += 1
-                
-                previous_placement = self.history_expert_gpu[i, expert_selected, j] # the chosen expert on gpu j history before update 
-                
-                # update gpu_nodes : compute speed(stable), utilization, available memory
-                old_utilization = deepcopy(self.gpu_nodes[i, j, 1])
-                old_available_memory = deepcopy(self.gpu_nodes[i, j, 2])
+                if gpu_selected[gpu] == True:
+                    self.replica_p[expert_selected].append(gpu)
+                    rewards += expand_cost
+                elif gpu_selected[gpu] == False:
+                    if gpu in self.replica_p[expert_selected]:
+                        self.replica_p[expert_selected].remove(gpu)
+                    reward += shrink_cost
 
-                token_load = self.current_token[i, expert_selected]
-                if previous_placement == 1:
-                    old_utilization -= token_load / self.current_token[i].sum() # 这里需要改为实际利用率
-                    old_available_memory += token_load
-                if gpu_selected[j] == 1:
-                    old_utilization += token_load / self.current_token[i].sum()
-                    old_available_memory -= token_load
-                
-                if (old_utilization > 0.9) or (old_available_memory < 0): # 如果超过利用率或者内存不足，不更新
-                    break
-                self.history_expert_gpu[i,expert_selected, j] = gpu_selected[j] # update expert_gpu！！！
 
-                self.gpu_nodes[i, j, 1] = np.clip(old_utilization, 0, 1)  # 更新utilization并确保不超过100%
-                self.gpu_nodes[i, j, 2] = np.clip(old_available_memory, 0, None)  # 更新available_memory并确保不为负
+        #根据最新的数据路由计算获取的奖励，已知expert的放置        
+        for i in range(self.number_of_experts): 
+            total_tokens = np.sum(data[i, :]) - data[i, i]   # 专家i发送给所有其他专家的token总数
+            self.current_token = total_tokens         #总共的token数目
 
-                # update gpu_links: bandwidth(stable), token traffic
-                for k in range(self.number_of_gpus):
-                    if k != j:
-                        if previous_placement == 1:
-                            self.gpu_links[i, j, k] -= self.current_token[i, expert_selected]
-                            self.gpu_links[i, k, j] -= self.current_token[i, expert_selected]
-                        if gpu_selected[j] == 1:
-                            self.gpu_links[i, j, k] += self.current_token[i, expert_selected]
-                            self.gpu_links[i, k, j] += self.current_token[i, expert_selected]
-                
-                # update mask_gpu
-                self.mask_gpu[i, j] = self.gpu_nodes[i, j, 1] > 0.9
-                done = self.done()
-                
-            # update expert_nodes : current token load(already updated), history popularity
+        previous_traffic = torch.sum(self.gpu_links)
+        done = False
+        #计算每个专家副本需要处理的token数目
+        expert_cap = np.zeros((self.number_of_experts,))
+        
+        for expert in range(self.number_of_experts):
+            tot_ep = len(self.replica_p[expert]) + 1
+            expert_cap[expert] = self.current_token[expert] // tot_ep
+
+        print(expert_cap)
+        #动作已提交，计算环境的变化
+
+
+        # redundant expert_gpu action makes no effect
+        for gpu in range(self.number_of_gpus):
             for expert in range(self.number_of_experts):
-                self.history_popularity[i, expert] = self.history_popularity[i, expert] * 0.9 + self.current_token[i, expert] * 0.1
+                if self.history_expert_gpu[expert,gpu] == True:
 
-            # update expert_links :
-            alpha = 0.6  # 调节当前数据和历史数据的权重
-            for ii in range(self.number_of_experts):
-                total_tokens = np.sum(data[i, ii, :])
-                if total_tokens > 0:
-                    for j in range(self.number_of_experts):
-                        current_ratio = data[i, ii, j] / total_tokens
-                        self.expert_traf[i, ii, j] = alpha * current_ratio + (1 - alpha) * self.expert_traf[i, ii, j]
-                else:
-                    self.expert_traf[i, ii, :] = self.expert_traf[i, ii, :] * (1 - alpha)
+           
+            # update gpu_nodes : compute speed(stable), utilization, available memory
+            old_utilization = deepcopy(self.gpu_nodes[gpu, 1])
+            old_available_memory = deepcopy(self.gpu_nodes[gpu, 2])
             
-            # update rewards : 如果跨GPU传输的数据量减少，则给予正奖励
-            current_traffic = torch.sum(self.gpu_links[i, :, :])
-            reward = 0
-            if current_traffic < previous_traffic:
-                reward = previous_traffic - current_traffic
-            # print(reward)
-            rewards.append(reward)
-            gpu_done.append(done)
+            # if (old_utilization > 0.9) or (old_available_memory < 0): # 如果超过利用率或者内存不足，不更新
+            #     break
+
+            self.gpu_nodes[gpu, 1] = np.clip(old_utilization, 0, 1)  # 更新utilization并确保不超过100%
+            self.gpu_nodes[gpu, 2] = np.clip(old_available_memory, 0, None)  # 更新available_memory并确保不为负
+
+            # update gpu_links: bandwidth(stable), token traffic
+            
+
+            # update mask_gpu
+            
+
+
+        # update expert_nodes -> expert traffic
+        alpha = 0.6  # 调节当前数据和历史数据的权重
+        for ii in range(self.number_of_experts):
+            total_tokens = np.sum(data[ii, :])
+            if total_tokens > 0:
+                for j in range(self.number_of_experts):
+                    current_ratio = data[ii, j] / total_tokens
+                    self.expert_traf[ii, j] = alpha * current_ratio + (1 - alpha) * self.expert_traf[ii, j]
+            else:
+                self.expert_traf[ii, :] = self.expert_traf[ii, :] * (1 - alpha)
+        
+        # update rewards : 如果跨GPU传输的数据量减少，则给予正奖励
+        current_traffic = torch.sum(self.gpu_links)
+        reward = 0
+        if current_traffic < previous_traffic:
+            reward = previous_traffic - current_traffic
+        # print(reward)
+        rewards.append(reward)
 
         self.expert_nodes = np.concatenate([
-            self.current_token.reshape(self.batch_size, self.number_of_experts, 1),
-            self.history_popularity.reshape(self.batch_size, self.number_of_experts, 1)
-        ], axis=2)
+            self.current_token.reshape(self.number_of_experts, 1),
+            self.history_popularity.reshape(self.number_of_experts, 1)
+        ], axis=1)
 
-        t2 = time.time()
-        dur_time = t2-t1
         #环境的返回值
-        return self.expert_nodes, self.expert_traf, self.gpu_nodes, self.gpu_links, self.mask_expert, self.mask_gpu, dur_time, gpu_done, rewards
-
-
+        return self.expert_nodes, self.expert_traf, self.gpu_nodes, self.gpu_links, self.mask_expert, self.mask_gpu, rewards

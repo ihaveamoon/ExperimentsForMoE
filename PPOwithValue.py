@@ -92,7 +92,8 @@ class PPO:
                                     num_decoder_layers = configs.num_mlp_layers_actor,
                                     num_critic_layers  = configs.num_mlp_layers_critic,
                                     num_experts = configs.n_e,
-                                    num_gpus = configs.n_g).to(device)
+                                    num_gpus = configs.n_g,
+                                    old_policy=False).to(device)
         
 
         self.policy_critic = MLPCritic(num_layers = num_mlp_layers_critic, 
@@ -100,7 +101,19 @@ class PPO:
                                         hidden_dim = configs.hidden_dim, 
                                         output_dim = 1).to(device)
         
-        self.old_policy = deepcopy(self.expert_gpu_actor)
+        self.old_policy = EXPERT_GPU_ACTOR(
+                                    expert_feature_dim = configs.expert_feature_dim,
+                                    gpu_feature_dim = configs.gpu_feature_dim,
+                                    hidden_dim = configs.hidden_dim,
+                                    expert_output_dim=configs.expert_output_dim,
+                                    gpu_output_dim=configs.gpu_output_dim,
+                                    num_layers = configs.num_layers, 
+                                    num_encoder_layers = configs.num_mlp_layers_feature_extract,
+                                    num_decoder_layers = configs.num_mlp_layers_actor,
+                                    num_critic_layers  = configs.num_mlp_layers_critic,
+                                    num_experts = configs.n_e,
+                                    num_gpus = configs.n_g,
+                                    old_policy=True).to(device)
 
         self.old_policy.load_state_dict(self.expert_gpu_actor.state_dict())
 
@@ -125,24 +138,24 @@ class PPO:
         rewards_all_env = []
 
         # 计算折扣奖励并进行标准化
-        for rewards_list, dones_list in zip(memories.env_rewards, memories.env_done):
-            rewards = []
-            discounted_reward = 0
+        rewards_list, dones_list  = memories.env_rewards, memories.env_done
+        rewards = []
+        discounted_reward = 0
 
-            rewards_list = rewards_list.squeeze() # 转换为一维张量
-            dones_list = dones_list.squeeze()
+        rewards_list = rewards_list.squeeze() # 转换为一维张量
+        dones_list = dones_list.squeeze()
 
-            for reward, is_terminal in zip(reversed(rewards_list), reversed(dones_list)):
-                if is_terminal:
-                    discounted_reward = 0
-                discounted_reward = reward + (self.gamma * discounted_reward)
-                rewards.insert(0, discounted_reward)
+        for reward, is_terminal in zip(reversed(rewards_list), reversed(dones_list)):
+            if is_terminal:
+                discounted_reward = 0
+            discounted_reward = reward + (self.gamma * discounted_reward)
+            rewards.insert(0, discounted_reward)
 
-            rewards = torch.tensor(rewards, dtype=torch.float).to(device)
-            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-            rewards_all_env.append(rewards)
+        rewards = torch.tensor(rewards, dtype=torch.float).to(device)
+        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+        rewards_all_env.append(rewards)
 
-        rewards_all_env = torch.stack(rewards_all_env, 0).squeeze()
+        rewards_all_env = rewards_all_env.squeeze()
         
         for _ in range(configs.k_epochs):
             loss_sum = 0
@@ -166,18 +179,16 @@ class PPO:
                 env_gpu_links = memories.gpu_link_fea[i]
                 env_mask_expert = memories.mask_expert[i]
                 env_mask_gpu = memories.mask_gpu[i]
-                expert_prob,expert_indices,gpu_prob,gpu_indices,v= self.expert_gpu_actor(ep_nodes=env_expert_nodes,
-                                                                                           ep_links=env_expert_links,
-                                                                                           gp_nodes=env_gpu_nodes, 
-                                                                                           gp_links=env_gpu_links,
-                                                                                           mask_ep=env_mask_expert,
-                                                                                           mask_gp=env_mask_gpu,
+                expert_prob,expert_indices,gpu_prob,gpu_indices,v= self.expert_gpu_actor(ep_nodes=env_expert_nodes.unsqueeze(0),
+                                                                                           ep_links=env_expert_links.unsqueeze(0),
+                                                                                           gp_nodes=env_gpu_nodes.unsqueeze(0), 
+                                                                                           gp_links=env_gpu_links.unsqueeze(0),
+                                                                                           mask_ep=env_mask_expert.unsqueeze(0),
+                                                                                           mask_gp=env_mask_gpu.unsqueeze(0),
                                                                                            old_policy = False)
 
                 print("\nexpert_prob[batch 0] = ", expert_prob[0], "\ngpu_prob[batch 0] = ", gpu_prob[0], "\n")
 
-                critic_input = torch.cat([expert_indices.expand(-1,gpu_indices.size(1)).float(), gpu_indices.float()], dim=1)
-                v = self.policy_critic(critic_input)
                 val.append(v)
 
                 # Calculate the log probabilities
@@ -271,7 +282,7 @@ def main(epochs):
     train_dataset = Simulate_Dataset(n_e_per_layer, configs.n_moe_layer, simu_tokens, configs.num_ins)
     validat_dataset = Simulate_Dataset(n_e_per_layer, configs.n_moe_layer, simu_tokens, 64)
     
-    # [样本数, 专家数, 专家数]: 样本k中，专家i到专家j需要路由的token数量
+    # [样本数, 专家数, 专家数]: 样本k中，专家i到专家j需要路由的token数量,train_dataset的生成需要更改
     data_loader = DataLoader(train_dataset, batch_size=configs.batch_size)
     valid_loader = DataLoader(validat_dataset, batch_size=configs.batch_size)
 
@@ -302,15 +313,16 @@ def main(epochs):
             pool = None
             ep_rewards = - env.initQuality
             
-            env_mask_expert = torch.from_numpy(np.copy(mask_expert)).to(device)
-            env_mask_gpu = torch.from_numpy(np.copy(mask_gpu)).to(device)
             #收集action对应的数据,对每个batch产生策略
             for state in range(1,states):
-                env_expert_links = deepcopy(torch.Tensor(expert_links)).to(device) # torch.Size([batch siez, n_e, n_e])
-                env_expert_nodes = deepcopy(torch.Tensor(expert_nodes)).to(device) # torch.Size([batch siez, n_e, fea_dim = 2])
+                env_expert_links = deepcopy(torch.Tensor(expert_links)).to(device) # torch.Size([n_e, n_e])
+                env_expert_nodes = deepcopy(torch.Tensor(expert_nodes)).to(device) # torch.Size([n_e, fea_dim = 2])
 
-                env_gpu_links = deepcopy(gpu_links).to(device) # torch.Size([batch siez, n_g, n_g])
-                env_gpu_nodes = deepcopy(gpu_nodes).to(device) # torch.Size([batch siez, n_g, fea_dim = 3])
+                env_gpu_links = deepcopy(gpu_links).to(device) # torch.Size([n_g, n_g])
+                env_gpu_nodes = deepcopy(gpu_nodes).to(device) # torch.Size([n_g, fea_dim = 3])
+
+                env_mask_expert = torch.from_numpy(np.copy(mask_expert)).to(device)
+                env_mask_gpu = torch.from_numpy(np.copy(mask_gpu)).to(device)
 
                 expert_prob,expert_index,gpu_prob,gpu_index= ppo.old_policy(ep_nodes=env_expert_nodes.unsqueeze(0),
                                                                             ep_links=env_expert_links.unsqueeze(0),
@@ -330,20 +342,17 @@ def main(epochs):
                 memory.gpu_node_fea.append(gpu_nodes)
                 memory.gpu_link_fea.append(gpu_links)
                 gpu_log_prob.append(gpu_prob)
+                memory.env_done.append(True  if state == states-1 else False )
                 # print("ei:",expert_index)
                 # print("gi:",gpu_index)
                 # 向环境提交选择的动作和机器，接收新的状态、奖励和完成标志等信息, 待修改！！！
-                expert_nodes, expert_links, gpu_nodes, gpu_links, mask_expert, mask_gpu, dur_time, gpu_done, reward = env.step(expert_index,
-                                                                                                gpu_index,
-                                                                                                data)
+                expert_nodes, expert_links, gpu_nodes, gpu_links, mask_expert, mask_gpu,  reward = env.step(expert_index,
+                                                                                                    gpu_index,
+                                                                                                    data)
                 ep_rewards += reward
 
-                env_rewards.append(deepcopy(reward))
-                env_done.append(deepcopy(gpu_done))
-                print('env step() : dur_time', dur_time)
+                env_rewards.append(reward)
 
-                if env.done(): # mask_gpu 没有可用的GPU时，结束
-                    break
             
             memory.mask_expert.append(env_mask_expert)
             memory.mask_gpu.append(env_mask_gpu)
@@ -354,7 +363,7 @@ def main(epochs):
             print("memory.env_done = ", env_done, "\n")
             memory.env_rewards.append(torch.tensor(env_rewards).float().permute(1, 0))
             memory.env_done.append(torch.tensor(env_done).float().permute(1, 0))
-
+            
             # rewards
             ep_rewards -= env.posRewards
             # ppo.update更新网络参数
